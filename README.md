@@ -35,14 +35,14 @@ Windows 是当前唯一完整支持的平台，因为 Qoder 凭据的读写依�
 cryptography>=42,<46
 ```
 
-前端没有构建步骤，页面通过 CDN 引入以下资源：
+前端没有构建步骤，项目已将以下运行时资源固定下载到 `static/vendor/`，页面运行不依赖 CDN：
 
 - Bootstrap 5.3.3
 - jQuery 3.7.1
 - Lucide 0.468.0
-- Google Fonts：Fira Sans、Fira Code
+- Google Fonts：Fira Sans、Fira Code（本地 `woff2` 字体文件）
 
-因此，首次加载页面和进行 Qoder 授权、额度刷新时需要可用的网络连接。
+首次添加账号或刷新额度时仍需要访问 Qoder 官方授权和额度接口；页面框架、图标和字体本身不再依赖外部 CDN。
 
 ## 快速开始
 
@@ -165,12 +165,15 @@ qoder-cockpit/
 ├─ static/
 │  ├─ index.html       # 页面结构
 │  ├─ app.js           # 前端交互
-│  └─ styles.css       # 页面样式
+│  ├─ styles.css       # 页面样式
+│  └─ vendor/          # 本地 Bootstrap、jQuery、Lucide 和字体资源
 ├─ .gitignore          # 本地数据与生成文件忽略规则
 └─ README.md
 ```
 
 运行数据默认位于 Qoder 用户目录，不应放入项目仓库。
+
+第三方前端资源的版本和许可证见 [`static/vendor/THIRD_PARTY_NOTICES.md`](static/vendor/THIRD_PARTY_NOTICES.md)。
 
 ## 数据目录
 
@@ -237,7 +240,7 @@ $env:QODER_SESSION_DB = "$env:APPDATA\Qoder\SharedClientCache\cache\db\local.db"
 - 服务默认监听 `127.0.0.1`。不要使用 `--host 0.0.0.0` 对外开放。
 - `cockpit.db` 包含可用于恢复登录状态的授权材料，不是可公开分享的数据文件。
 - 账号授权和额度查询会把授权令牌发送到 Qoder 官方接口；项目本身没有其它后端或遥测服务。
-- 页面会从 Google Fonts、jsDelivr 和 unpkg 加载静态资源，这些 CDN 会收到常规网络请求信息。
+- 页面框架、图标和字体均从项目内的 `static/vendor/` 加载，不会因 CDN 不可用而缺少这些资源。
 - 会话快照和备份可能包含完整对话、代码片段、项目路径和账号标识。
 - 仓库的 `.gitignore` 已排除常见数据库、快照、缓存和本地环境文件，但提交前仍应检查 `git status`。
 - 删除页面中的账号只删除 Cockpit 本地账号记录，不会注销 Qoder 账号。

@@ -952,7 +952,15 @@ class Handler(BaseHTTPRequestHandler):
                 if STATIC_ROOT.resolve() not in target.parents:
                     raise RuntimeError("非法静态资源路径")
                 content = target.read_bytes()
-                content_type = "text/css" if target.suffix == ".css" else "text/javascript"
+                # 为本地字体返回正确 MIME，避免浏览器因 nosniff 或字体格式校验拒绝加载。
+                content_types = {
+                    ".css": "text/css",
+                    ".js": "text/javascript",
+                    ".woff2": "font/woff2",
+                    ".woff": "font/woff",
+                    ".ttf": "font/ttf",
+                }
+                content_type = content_types.get(target.suffix.lower(), "application/octet-stream")
                 self.send_response(200)
                 self.send_header("Content-Type", f"{content_type}; charset=utf-8")
                 self.send_header("Content-Length", str(len(content)))
