@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Qoder Cockpit</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <main class="main">
+        <header class="app-header">
+          <div class="brand">
+            <span class="brand-mark">Q</span>
+            <div>
+              <strong>Qoder Cockpit</strong><small>本机账号工作台</small>
+            </div>
+          </div>
+          <nav class="page-tabs" aria-label="页面导航">
+            <a class="page-tab active" href="#overview">总览</a>
+            <a class="page-tab" href="#accounts">账号与额度</a>
+            <a class="page-tab" href="#sessions">会话继承</a>
+          </nav>
+          <div class="header-status">
+            <span class="status-dot" id="sidebar-dot"></span
+            ><span id="sidebar-status">正在检查 Qoder</span>
+          </div>
+        </header>
+
+        <section class="overview-section" id="overview">
+          <header class="topbar">
+            <div>
+              <p class="eyebrow">LOCAL CONTROL PLANE</p>
+              <h1>账号与会话</h1>
+              <p class="subhead">
+                集中查看额度、切换身份，并延续本机全部项目会话。
+              </p>
+            </div>
+            <div class="top-actions">
+              <button class="button secondary" id="refresh-btn">
+                <i data-lucide="refresh-cw"></i><span>刷新状态</span></button
+              ><button class="button secondary" id="start-qoder-btn">
+                <i data-lucide="play"></i><span>启动 Qoder</span></button
+              ><button class="button primary" id="import-local-btn">
+                <i data-lucide="download"></i><span>导入当前账号</span>
+              </button>
+            </div>
+          </header>
+
+          <section class="summary-grid" aria-label="运行概览">
+            <article class="metric">
+              <span class="metric-label">已管理账号</span
+              ><strong id="account-count">--</strong
+              ><span class="metric-note">本机快照</span>
+            </article>
+            <article class="metric">
+              <span class="metric-label">当前登录</span
+              ><strong id="current-account">未识别</strong
+              ><span class="metric-note" id="current-plan"
+                >等待 Qoder 状态</span
+              >
+            </article>
+            <article class="metric">
+              <span class="metric-label">项目会话</span
+              ><strong id="project-count">--</strong
+              ><span class="metric-note">可同步项目</span>
+            </article>
+            <article class="metric accent">
+              <span class="metric-label">Qoder 状态</span
+              ><strong id="qoder-state">检查中</strong
+              ><span class="metric-note" id="state-db-note">本地服务</span>
+            </article>
+          </section>
+        </section>
+
+        <section class="section" id="accounts">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">IDENTITY &amp; QUOTA</p>
+              <h2>账号与额度</h2>
+              <p class="section-desc">
+                后台每 5 分钟同步一次，页面每 15 秒显示最新结果。
+              </p>
+            </div>
+            <div class="section-actions">
+              <button class="button secondary" id="refresh-credits-btn">
+                <i data-lucide="gauge"></i
+                ><span class="button-label">刷新额度</span></button
+              ><button class="button primary" id="add-account-btn">
+                <i data-lucide="user-plus"></i><span>添加账号</span>
+              </button>
+            </div>
+          </div>
+          <div class="account-layout">
+            <div class="account-list" id="account-list">
+              <div class="empty">
+                还没有保存的账号。点击“添加账号”完成官方授权。
+              </div>
+            </div>
+            <aside class="detail-panel">
+              <div class="protection-summary">
+                <div class="panel-kicker">切换前检查</div>
+                <h3>本地数据保护</h3>
+                <p>
+                  切号时会自动请求关闭 Qoder，备份 `state.vscdb`
+                  与项目原内容，完成后自动重新启动。
+                </p>
+                <div class="protection-row">
+                  <span class="status-dot" id="detail-dot"></span
+                  ><span id="detail-status">检查中</span>
+                </div>
+              </div>
+              <div class="path-block">
+                <span>Qoder 数据库</span><code id="state-db-path">--</code>
+              </div>
+              <div class="path-block">
+                <span>会话快照目录</span
+                ><code id="store-path">~/.qoder/cockpit-local</code>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="section" id="sessions">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">SESSION CONTINUITY</p>
+              <h2>切号会话设置</h2>
+              <p class="section-desc">
+                在账号卡片中发起切换；这里只配置来源账号与会话继承方式。
+              </p>
+            </div>
+          </div>
+          <div class="switch-card session-settings">
+            <div class="flow-step">
+              <span class="step-no">01</span>
+              <div>
+                <label for="source-account">上一个账号</label
+                ><select id="source-account"></select
+                ><small
+                  >会保存它的全部项目 transcript 和 session.execution。</small
+                >
+              </div>
+            </div>
+            <div class="flow-step">
+              <span class="step-no">02</span>
+              <div>
+                <label>继承方式</label>
+                <div class="toggle-row">
+                  <input type="checkbox" id="inherit-sessions" checked /><label
+                    class="toggle-label"
+                    for="inherit-sessions"
+                    >同步全部项目会话</label
+                  >
+                </div>
+                <small>恢复前自动备份目标目录。</small>
+              </div>
+            </div>
+          </div>
+          <div class="notice" id="operation-notice" role="status">
+            准备就绪。请先确认 Qoder 已关闭。
+          </div>
+        </section>
+
+        <section class="section project-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">PROJECT INVENTORY</p>
+              <h2>项目会话</h2>
+            </div>
+            <span class="table-note">来自 <code>~/.qoder/projects</code></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>项目</th>
+                  <th>对话记录</th>
+                  <th>执行目录</th>
+                  <th>路径</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="project-table">
+                <tr>
+                  <td colspan="5" class="empty">正在读取项目目录…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <footer>
+          Qoder Cockpit 0.1 · 仅监听 127.0.0.1 · 不上传账号和会话数据
+        </footer>
+      </main>
+    </div>
+    <dialog id="oauth-dialog">
+      <form method="dialog" class="dialog-card">
+        <div class="dialog-head">
+          <div>
+            <p class="eyebrow">QODER AUTHORIZATION</p>
+            <h3>添加 Qoder 账号</h3>
+          </div>
+          <button value="cancel" class="icon-button" aria-label="关闭">
+            ×
+          </button>
+        </div>
+        <p>点击下方按钮打开 Qoder 官方授权页，登录完成后返回此窗口等待同步。</p>
+        <div class="oauth-url" id="oauth-url">正在创建授权会话…</div>
+        <div class="dialog-actions">
+          <button value="cancel" class="button secondary" id="oauth-cancel">
+            取消</button
+          ><button value="default" class="button primary" id="oauth-open">
+            打开授权页
+          </button>
+        </div>
+        <div class="oauth-status" id="oauth-status" role="status">
+          准备授权…
+        </div>
+      </form>
+    </dialog>
+    <script
+      src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"
+      defer
+    ></script>
+    <script src="/static/app.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>

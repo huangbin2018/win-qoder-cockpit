@@ -1,0 +1,32 @@
+# Python 缓存和本地虚拟环境
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本地配置、日志和编辑器文件
+.env
+.env.*
+!.env.example
+*.log
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 浏览器检查产物
+.playwright-cli/
+
+# Qoder/Cockpit 敏感数据与运行产物
+cockpit-local/
+cockpit-data/
+cockpit.db
+cockpit.db-*
+state.vscdb
+state.vscdb-*
+local.db
+local.db-*
+*.vscdb
+sessions/
+backups/
+staging/
