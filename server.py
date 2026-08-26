@@ -962,7 +962,9 @@ class Handler(BaseHTTPRequestHandler):
                 }
                 content_type = content_types.get(target.suffix.lower(), "application/octet-stream")
                 self.send_response(200)
-                self.send_header("Content-Type", f"{content_type}; charset=utf-8")
+                if content_type.startswith("text/"):
+                    content_type = f"{content_type}; charset=utf-8"
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(content)))
                 self.end_headers()
                 self.wfile.write(content)
