@@ -4,232 +4,359 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Qoder Cockpit</title>
+    <script>
+      (function () {
+        var theme = localStorage.getItem("cockpit-theme");
+        if (theme !== "light" && theme !== "dark") {
+          theme =
+            window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+        }
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
     <link rel="stylesheet" href="/static/vendor/fonts/fonts.css" />
-    <link
-      href="/static/vendor/bootstrap/5.3.3/bootstrap.min.css"
-      rel="stylesheet"
-    />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <div class="shell">
-      <main class="main">
-        <header class="app-header">
-          <div class="brand">
-            <span class="brand-mark">Q</span>
-            <div>
-              <strong>Qoder Cockpit</strong><small>本机账号工作台</small>
-            </div>
-          </div>
-          <nav class="page-tabs" aria-label="页面导航">
-            <a class="page-tab active" href="#overview">总览</a>
-            <a class="page-tab" href="#accounts">账号与额度</a>
-            <a class="page-tab" href="#sessions">会话继承</a>
-          </nav>
-          <div class="header-status">
-            <span class="status-dot" id="sidebar-dot"></span
-            ><span id="sidebar-status">正在检查 Qoder</span>
-          </div>
-        </header>
+    <div class="app-shell">
+      <header class="app-header">
+        <a class="brand" href="#/overview">
+          <span class="brand-mark" aria-hidden="true">Q</span>
+          <span class="brand-text"
+            ><strong>Qoder Cockpit</strong><small>本机账号工作台</small></span
+          >
+        </a>
+        <nav class="primary-nav" aria-label="主导航">
+          <a href="#/overview" data-view-link="overview">总览</a>
+          <a href="#/accounts" data-view-link="accounts">账号</a>
+          <a href="#/sessions" data-view-link="sessions">会话</a>
+          <a href="#/backups" data-view-link="backups">备份</a>
+        </nav>
+        <div class="header-right">
+          <span class="runtime-badge" id="runtime-badge">
+            <span class="status-dot is-checking" id="runtime-dot"></span>
+            <span id="runtime-text">正在检查 Qoder</span>
+          </span>
+          <button
+            class="btn-icon theme-toggle"
+            id="theme-toggle"
+            type="button"
+            aria-label="切换浅色/深色主题"
+            title="切换浅色 / 深色主题"
+          >
+            <i data-lucide="moon" class="icon-moon"></i
+            ><i data-lucide="sun" class="icon-sun"></i>
+          </button>
+        </div>
+      </header>
 
-        <section class="overview-section" id="overview">
-          <header class="topbar">
+      <main class="app-main">
+        <section class="view" id="view-overview" aria-labelledby="overview-title">
+          <header class="view-header">
             <div>
-              <p class="eyebrow">LOCAL CONTROL PLANE</p>
-              <h1>账号与会话</h1>
-              <p class="subhead">
+              <h1 id="overview-title">账号与会话</h1>
+              <p class="view-desc">
                 集中查看额度、切换身份，并延续本机全部项目会话。
               </p>
             </div>
-            <div class="top-actions">
-              <button class="button secondary" id="refresh-btn">
-                <i data-lucide="refresh-cw"></i><span>刷新状态</span></button
-              ><button class="button secondary" id="start-qoder-btn">
-                <i data-lucide="play"></i><span>启动 Qoder</span></button
-              ><button class="button primary" id="import-local-btn">
-                <i data-lucide="download"></i><span>导入当前账号</span>
+            <div class="view-actions" id="overview-actions"></div>
+          </header>
+
+          <div class="runtime-bar" id="runtime-bar" role="status"></div>
+
+          <div class="metric-strip" aria-label="运行概览">
+            <div class="metric">
+              <span class="metric-label">已管理账号</span>
+              <strong id="m-accounts">--</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">可用工作区</span>
+              <strong id="m-workspaces">--</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">会话总数</span>
+              <strong id="m-sessions">--</strong>
+            </div>
+          </div>
+
+          <section class="panel">
+            <h2>需要处理</h2>
+            <ul class="attention-list" id="attention-list">
+              <li class="empty-state">正在检查本机状态…</li>
+            </ul>
+          </section>
+
+          <section class="panel">
+            <h2>快捷入口</h2>
+            <div class="quick-links">
+              <a class="btn btn-secondary" href="#/accounts"
+                ><i data-lucide="user-plus" aria-hidden="true"></i>添加账号</a
+              >
+              <a class="btn btn-secondary" href="#/sessions"
+                ><i data-lucide="messages-square" aria-hidden="true"></i
+                >打开会话</a
+              >
+              <a class="btn btn-secondary" href="#/backups"
+                ><i data-lucide="archive" aria-hidden="true"></i>查看备份</a
+              >
+            </div>
+          </section>
+        </section>
+
+        <section class="view" id="view-accounts" hidden aria-labelledby="accounts-title">
+          <header class="view-header">
+            <div>
+              <h1 id="accounts-title">账号</h1>
+              <p class="view-desc">查看额度、授权与切换身份。</p>
+            </div>
+            <div class="view-actions">
+              <button class="btn btn-secondary" id="refresh-credits-btn" type="button">
+                <i data-lucide="gauge" aria-hidden="true"></i
+                ><span class="btn-label">刷新额度</span>
+              </button>
+              <button class="btn btn-secondary" id="import-local-btn" type="button">
+                <i data-lucide="download" aria-hidden="true"></i
+                ><span class="btn-label">导入当前账号</span>
+              </button>
+              <button class="btn btn-primary" id="add-account-btn" type="button">
+                <i data-lucide="user-plus" aria-hidden="true"></i
+                ><span class="btn-label">添加账号</span>
+              </button>
+            </div>
+          </header>
+          <div class="account-layout">
+            <div class="account-list" id="account-list" aria-label="账号列表">
+              <div class="skeleton-row" aria-hidden="true"></div>
+              <div class="skeleton-row" aria-hidden="true"></div>
+              <div class="skeleton-row" aria-hidden="true"></div>
+            </div>
+            <aside class="account-detail" id="account-detail" aria-live="polite"></aside>
+          </div>
+        </section>
+
+        <section class="view" id="view-sessions" hidden aria-labelledby="sessions-title">
+          <header class="view-header">
+            <div>
+              <h1 id="sessions-title">会话</h1>
+              <p class="view-desc">查看和操作 IDE 与 Quest 会话。</p>
+            </div>
+            <div class="view-actions">
+              <a class="btn btn-secondary" href="/api/chat/export"
+                ><i data-lucide="file-down" aria-hidden="true"></i
+                ><span class="btn-label">导出 MD</span></a
+              >
+              <button class="btn btn-secondary" id="refresh-chats-btn" type="button">
+                <i data-lucide="refresh-cw" aria-hidden="true"></i
+                ><span class="btn-label">刷新</span>
               </button>
             </div>
           </header>
 
-          <section class="summary-grid" aria-label="运行概览">
-            <article class="metric">
-              <span class="metric-label">已管理账号</span
-              ><strong id="account-count">--</strong
-              ><span class="metric-note">本机快照</span>
-            </article>
-            <article class="metric">
-              <span class="metric-label">当前登录</span
-              ><strong id="current-account">未识别</strong
-              ><span class="metric-note" id="current-plan"
-                >等待 Qoder 状态</span
-              >
-            </article>
-            <article class="metric">
-              <span class="metric-label">项目会话</span
-              ><strong id="project-count">--</strong
-              ><span class="metric-note">可同步项目</span>
-            </article>
-            <article class="metric accent">
-              <span class="metric-label">Qoder 状态</span
-              ><strong id="qoder-state">检查中</strong
-              ><span class="metric-note" id="state-db-note">本地服务</span>
-            </article>
-          </section>
+          <div class="session-layout">
+            <aside class="workspace-side" aria-label="工作区列表">
+              <div class="side-title">工作区</div>
+              <select
+                id="workspace-select-mobile"
+                class="workspace-select-mobile"
+                aria-label="选择工作区"
+              ></select>
+              <ul class="workspace-list" id="workspace-list"></ul>
+            </aside>
+
+            <div class="session-content">
+              <div class="session-toolbar">
+                <div class="seg" role="group" aria-label="类型筛选">
+                  <button class="seg-btn is-active" data-kind="all" type="button">全部</button>
+                  <button class="seg-btn" data-kind="ide" type="button">IDE</button>
+                  <button class="seg-btn" data-kind="quest" type="button">Quest</button>
+                </div>
+                <input
+                  id="session-search"
+                  type="search"
+                  placeholder="搜索标题…"
+                  aria-label="搜索会话标题"
+                />
+                <button
+                  class="btn-icon"
+                  id="session-help-btn"
+                  type="button"
+                  aria-label="数据来源说明"
+                  title="数据来源说明"
+                >
+                  <i data-lucide="circle-help"></i>
+                </button>
+                <span class="toolbar-spacer"></span>
+                <button class="btn btn-secondary" id="backup-chat-btn" type="button">
+                  <i data-lucide="archive" aria-hidden="true"></i
+                  ><span class="btn-label">备份工作区</span>
+                </button>
+                <button class="btn btn-secondary" id="restore-latest-btn" type="button">
+                  <i data-lucide="history" aria-hidden="true"></i
+                  ><span class="btn-label">恢复最新</span>
+                </button>
+              </div>
+              <p class="help-note" id="session-help" hidden>
+                IDE 来源：lingma.chat.localHistory.&lt;workspace-id&gt;；Quest 来源：
+                aicoding.questTaskListSnapshot.folders[*].tasks，按 filePath 归属工作区。
+              </p>
+
+              <div class="workspace-summary" id="workspace-summary"></div>
+
+              <div class="bulk-bar" id="bulk-bar" hidden>
+                <span id="bulk-count">已选 0 条</span>
+                <button class="btn btn-danger" id="bulk-delete-btn" type="button">
+                  <i data-lucide="trash-2" aria-hidden="true"></i>删除
+                </button>
+                <button class="btn btn-ghost" id="bulk-clear-btn" type="button">
+                  取消选择
+                </button>
+              </div>
+
+              <div class="table-wrap">
+                <table class="data-table" id="session-table">
+                  <thead>
+                    <tr>
+                      <th class="check-col">
+                        <input type="checkbox" id="session-select-all" aria-label="全选当前列表" />
+                      </th>
+                      <th>类型</th>
+                      <th>标题</th>
+                      <th>状态</th>
+                      <th>时间</th>
+                      <th>上下文</th>
+                      <th class="ops-col"><span class="sr-only">操作</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="session-tbody">
+                    <tr><td colspan="7" class="empty-state">正在读取工作区…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <section class="danger-zone" aria-label="危险操作">
+                <h2>危险操作</h2>
+                <p class="zone-note">以下操作影响范围较大，执行前均会自动备份。</p>
+                <div class="zone-actions">
+                  <button class="btn btn-ghost" id="repair-chat-btn" type="button">
+                    <i data-lucide="wrench" aria-hidden="true"></i>修复显示索引
+                  </button>
+                  <button class="btn btn-ghost" id="merge-chat-btn" type="button">
+                    <i data-lucide="merge" aria-hidden="true"></i>合并工作区
+                  </button>
+                  <button class="btn btn-danger" id="delete-workspace-btn" type="button">
+                    <i data-lucide="trash-2" aria-hidden="true"></i>删除工作区
+                  </button>
+                </div>
+                <div class="merge-row" id="merge-row" hidden>
+                  <span>将当前工作区合并到</span>
+                  <select id="merge-target" aria-label="合并目标工作区"></select>
+                  <button class="btn btn-danger" id="confirm-merge-btn" type="button">
+                    确认合并
+                  </button>
+                </div>
+              </section>
+            </div>
+          </div>
         </section>
 
-        <section class="section" id="accounts">
-          <div class="section-head">
+        <section class="view" id="view-backups" hidden aria-labelledby="backups-title">
+          <header class="view-header">
             <div>
-              <p class="eyebrow">IDENTITY &amp; QUOTA</p>
-              <h2>账号与额度</h2>
-              <p class="section-desc">
-                后台每 5 分钟同步一次，页面每 15 秒显示最新结果。
-              </p>
+              <h1 id="backups-title">备份</h1>
+              <p class="view-desc">查看、恢复和删除会话备份。</p>
             </div>
-            <div class="section-actions">
-              <button class="button secondary" id="refresh-credits-btn">
-                <i data-lucide="gauge"></i
-                ><span class="button-label">刷新额度</span></button
-              ><button class="button primary" id="add-account-btn">
-                <i data-lucide="user-plus"></i><span>添加账号</span>
+            <div class="view-actions">
+              <button class="btn btn-secondary" id="refresh-backups-btn" type="button">
+                <i data-lucide="refresh-cw" aria-hidden="true"></i
+                ><span class="btn-label">刷新</span>
+              </button>
+              <button class="btn btn-primary" id="backup-all-btn" type="button">
+                <i data-lucide="archive" aria-hidden="true"></i
+                ><span class="btn-label">备份全部</span>
               </button>
             </div>
-          </div>
-          <div class="account-layout">
-            <div class="account-list" id="account-list">
-              <div class="empty">
-                还没有保存的账号。点击“添加账号”完成官方授权。
-              </div>
-            </div>
-            <aside class="detail-panel">
-              <div class="protection-summary">
-                <div class="panel-kicker">切换前检查</div>
-                <h3>本地数据保护</h3>
-                <p>
-                  切号时会自动请求关闭 Qoder，备份 `state.vscdb`
-                  与项目原内容，完成后自动重新启动。
-                </p>
-                <div class="protection-row">
-                  <span class="status-dot" id="detail-dot"></span
-                  ><span id="detail-status">检查中</span>
-                </div>
-              </div>
-              <div class="path-block">
-                <span>Qoder 数据库</span><code id="state-db-path">--</code>
-              </div>
-              <div class="path-block">
-                <span>会话快照目录</span
-                ><code id="store-path">~/.qoder/cockpit-local</code>
-              </div>
-            </aside>
-          </div>
-        </section>
-
-        <section class="section" id="sessions">
-          <div class="section-head">
-            <div>
-              <p class="eyebrow">SESSION CONTINUITY</p>
-              <h2>切号会话设置</h2>
-              <p class="section-desc">
-                在账号卡片中发起切换；这里只配置来源账号与会话继承方式。
-              </p>
-            </div>
-          </div>
-          <div class="switch-card session-settings">
-            <div class="flow-step">
-              <span class="step-no">01</span>
-              <div>
-                <label for="source-account">上一个账号</label
-                ><select id="source-account"></select
-                ><small
-                  >会保存它的全部项目 transcript 和 session.execution。</small
-                >
-              </div>
-            </div>
-            <div class="flow-step">
-              <span class="step-no">02</span>
-              <div>
-                <label>继承方式</label>
-                <div class="toggle-row">
-                  <input type="checkbox" id="inherit-sessions" checked /><label
-                    class="toggle-label"
-                    for="inherit-sessions"
-                    >同步全部项目会话</label
-                  >
-                </div>
-                <small>恢复前自动备份目标目录。</small>
-              </div>
-            </div>
-          </div>
-          <div class="notice" id="operation-notice" role="status">
-            准备就绪。请先确认 Qoder 已关闭。
-          </div>
-        </section>
-
-        <section class="section project-section">
-          <div class="section-head">
-            <div>
-              <p class="eyebrow">PROJECT INVENTORY</p>
-              <h2>项目会话</h2>
-            </div>
-            <span class="table-note">来自 <code>~/.qoder/projects</code></span>
-          </div>
+          </header>
+          <div class="backup-summary" id="backup-summary"></div>
           <div class="table-wrap">
-            <table>
+            <table class="data-table" id="backup-table">
               <thead>
                 <tr>
-                  <th>项目</th>
-                  <th>对话记录</th>
-                  <th>执行目录</th>
-                  <th>路径</th>
-                  <th>操作</th>
+                  <th>备份文件</th>
+                  <th>覆盖工作区</th>
+                  <th>创建时间</th>
+                  <th>大小</th>
+                  <th class="ops-col"><span class="sr-only">操作</span></th>
                 </tr>
               </thead>
-              <tbody id="project-table">
-                <tr>
-                  <td colspan="5" class="empty">正在读取项目目录…</td>
-                </tr>
+              <tbody id="backup-tbody">
+                <tr><td colspan="5" class="empty-state">正在读取备份…</td></tr>
               </tbody>
             </table>
           </div>
         </section>
-        <footer>
-          Qoder Cockpit 0.1 · 仅监听 127.0.0.1 · 不上传账号和会话数据
-        </footer>
       </main>
+
+      <div class="toast-region" id="toast-region" aria-live="polite"></div>
     </div>
-    <dialog id="oauth-dialog">
-      <form method="dialog" class="dialog-card">
+
+    <aside class="drawer" id="session-drawer" hidden>
+      <div class="drawer-backdrop" data-drawer-close></div>
+      <div class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+        <header class="drawer-head">
+          <h2 id="drawer-title">会话详情</h2>
+          <button class="btn-icon" id="drawer-close" type="button" aria-label="关闭详情">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div class="drawer-body" id="drawer-body"></div>
+      </div>
+    </aside>
+
+    <dialog id="confirm-dialog" class="app-dialog">
+      <div class="dialog-card">
+        <h3 id="confirm-title">确认操作</h3>
+        <div class="confirm-body" id="confirm-body"></div>
+        <label class="confirm-ack" id="confirm-ack-wrap" hidden>
+          <input type="checkbox" id="confirm-ack" />
+          <span id="confirm-ack-text"></span>
+        </label>
+        <div class="dialog-actions">
+          <button class="btn btn-ghost" id="confirm-cancel" type="button">取消</button>
+          <button class="btn btn-danger" id="confirm-ok" type="button">确认</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="oauth-dialog" class="app-dialog">
+      <div class="dialog-card">
         <div class="dialog-head">
           <div>
-            <p class="eyebrow">QODER AUTHORIZATION</p>
             <h3>添加 Qoder 账号</h3>
+            <p class="dialog-desc">
+              点击下方按钮打开 Qoder 官方授权页，登录完成后返回此窗口等待同步。
+            </p>
           </div>
-          <button value="cancel" class="icon-button" aria-label="关闭">
-            ×
+          <button value="cancel" class="btn-icon" aria-label="关闭">
+            <i data-lucide="x"></i>
           </button>
         </div>
-        <p>点击下方按钮打开 Qoder 官方授权页，登录完成后返回此窗口等待同步。</p>
         <div class="oauth-url" id="oauth-url">正在创建授权会话…</div>
         <div class="dialog-actions">
-          <button value="cancel" class="button secondary" id="oauth-cancel">
-            取消</button
-          ><button value="default" class="button primary" id="oauth-open">
+          <button value="cancel" class="btn btn-ghost" id="oauth-cancel" type="button">
+            取消
+          </button>
+          <button value="default" class="btn btn-primary" id="oauth-open" type="button">
             打开授权页
           </button>
         </div>
-        <div class="oauth-status" id="oauth-status" role="status">
-          准备授权…
-        </div>
-      </form>
+        <div class="oauth-status" id="oauth-status" role="status">准备授权…</div>
+      </div>
     </dialog>
-    <script
-      src="/static/vendor/lucide/0.468.0/lucide.min.js"
-      defer
-    ></script>
+
+    <script src="/static/vendor/lucide/0.468.0/lucide.min.js" defer></script>
     <script src="/static/app.js" defer></script>
-    <script src="/static/vendor/jquery/3.7.1/jquery.min.js"></script>
-    <script src="/static/vendor/bootstrap/5.3.3/bootstrap.bundle.min.js"></script>
   </body>
 </html>

@@ -310,6 +310,18 @@ def project_root() -> Path:
     return QODER_ROOT / "projects"
 
 
+def qoder_user_root() -> Path:
+    """返回包含 globalStorage 与 workspaceStorage 的 Qoder 用户数据目录。"""
+    state_db = qoder_state_db()
+    if state_db is not None:
+        return state_db.parent.parent
+    return Path(os.environ.get("APPDATA", "")) / "Qoder" / "User"
+
+
+def workspace_storage_root() -> Path:
+    return qoder_user_root() / "workspaceStorage"
+
+
 def qoder_executable() -> Path | None:
     configured = os.environ.get("QODER_APP_PATH")
     candidates = [
@@ -626,37 +638,83 @@ def backup_session_database(path: Path) -> Path:
     return destination
 
 
+def sqlite_table_columns(db: sqlite3.Connection, table: str) -> set[str] | None:
+    """读取 Qoder 某张表的字段；未安装对应功能时返回 None。"""
+    exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    if not exists:
+        return None
+    return {str(row[1]) for row in db.execute(f'PRAGMA table_info("{table}")')}
+
+
+def validate_local_session_database(path: Path) -> None:
+    """切号前确认基础 Chat 会话表可迁移，避免写入账号后才发现数据库不兼容。"""
+    db = db_connect(path, True)
+    try:
+        columns = sqlite_table_columns(db, "chat_session")
+        missing = {"session_id", "user_id"} - (columns or set())
+        if missing:
+            names = "、".join(sorted(missing))
+            raise RuntimeError(f"Qoder local.db 缺少 chat_session 必需字段：{names}")
+    finally:
+        db.close()
+
+
 def rebind_local_sessions(path: Path, source_values: dict[str, Any], target_values: dict[str, Any]) -> dict[str, Any]:
-    """把来源账号的本地 Chat/Quest 会话归属迁移到目标账号。"""
+    """把来源账号的本地 Chat 会话及已安装扩展表归属迁移到目标账号。"""
     source = qoder_account_identity(source_values)
     target = qoder_account_identity(target_values)
     if source["user_id"] == target["user_id"]:
-        return {"session_count": 0, "backup": None, "tables": {}}
+        return {"session_count": 0, "backup": None, "tables": {}, "skipped_tables": {}}
 
     read_db = db_connect(path, True)
     try:
+        chat_columns = sqlite_table_columns(read_db, "chat_session")
+        if not chat_columns or not {"session_id", "user_id"}.issubset(chat_columns):
+            raise RuntimeError("Qoder local.db 的 chat_session 表不兼容，无法同步 IDE 历史会话。")
         session_ids = [row[0] for row in read_db.execute("SELECT session_id FROM chat_session WHERE user_id = ?", (source["user_id"],)).fetchall()]
     finally:
         read_db.close()
     if not session_ids:
-        return {"session_count": 0, "backup": None, "tables": {}}
+        return {"session_count": 0, "backup": None, "tables": {}, "skipped_tables": {}}
 
     # local.db 保存完整会话正文和索引，写入任何归属字段前都先生成可独立恢复的全库备份。
     backup = backup_session_database(path)
     db = sqlite3.connect(path, timeout=30)
     counts: dict[str, int] = {}
+    skipped_tables: dict[str, str] = {}
     try:
         db.execute("BEGIN IMMEDIATE")
         db.execute("CREATE TEMP TABLE cockpit_moved_sessions (session_id TEXT PRIMARY KEY)")
         db.executemany("INSERT INTO cockpit_moved_sessions(session_id) VALUES (?)", ((item,) for item in session_ids))
 
-        # 主会话表决定 Qoder 历史列表归属，执行记录和会话产生的记忆必须跟随同一批 session_id。
+        # 基础 Qoder IDE 只保证 user_id；显示名和组织字段存在时再同步，兼容不同版本表结构。
+        chat_columns = sqlite_table_columns(db, "chat_session") or set()
+        assignments = ["user_id = ?"]
+        parameters = [target["user_id"]]
+        for column, value in (("user_name", target["display_name"]), ("org_id", target["org_id"])):
+            if column in chat_columns:
+                assignments.append(f"{column} = ?")
+                parameters.append(value)
+        parameters.append(source["user_id"])
         cursor = db.execute(
-            "UPDATE chat_session SET user_id = ?, user_name = ?, org_id = ? WHERE user_id = ?",
-            (target["user_id"], target["display_name"], target["org_id"], source["user_id"]),
+            f"UPDATE chat_session SET {', '.join(assignments)} WHERE user_id = ?",
+            parameters,
         )
         counts["chat_session"] = cursor.rowcount
+
+        # Quest/Agent 扩展表不是 Qoder IDE 必装组件；仅迁移当前版本实际存在且字段完整的表。
         for table in ("local_execution", "agent_memory"):
+            columns = sqlite_table_columns(db, table)
+            required = {"session_id", "user_id"}
+            if columns is None:
+                skipped_tables[table] = "未安装对应扩展组件"
+                continue
+            if not required.issubset(columns):
+                skipped_tables[table] = "缺少 session_id 或 user_id 字段"
+                continue
             cursor = db.execute(
                 f"UPDATE {table} SET user_id = ? WHERE user_id = ? AND session_id IN (SELECT session_id FROM cockpit_moved_sessions)",
                 (target["user_id"], source["user_id"]),
@@ -664,21 +722,32 @@ def rebind_local_sessions(path: Path, source_values: dict[str, Any], target_valu
             counts[table] = cursor.rowcount
 
         # task 同步元数据使用 userId::orgId 作为账号键，只迁移本批 Quest，避免覆盖目标账号的全局同步游标。
-        source_sync_id = f"{source['user_id']}::{source['org_id']}" if source["org_id"] else source["user_id"]
-        target_sync_id = f"{target['user_id']}::{target['org_id']}" if target["org_id"] else target["user_id"]
-        cursor = db.execute(
-            "UPDATE sync_metadata SET user_id = ? WHERE entity_type = 'task' AND user_id IN (?, ?) "
-            "AND entity_id IN (SELECT session_id FROM cockpit_moved_sessions)",
-            (target_sync_id, source["user_id"], source_sync_id),
-        )
-        counts["sync_metadata"] = cursor.rowcount
+        sync_columns = sqlite_table_columns(db, "sync_metadata")
+        if sync_columns is None:
+            skipped_tables["sync_metadata"] = "未安装任务同步组件"
+        elif not {"user_id", "entity_type", "entity_id"}.issubset(sync_columns):
+            skipped_tables["sync_metadata"] = "缺少任务同步必需字段"
+        else:
+            source_sync_id = f"{source['user_id']}::{source['org_id']}" if source["org_id"] else source["user_id"]
+            target_sync_id = f"{target['user_id']}::{target['org_id']}" if target["org_id"] else target["user_id"]
+            cursor = db.execute(
+                "UPDATE sync_metadata SET user_id = ? WHERE entity_type = 'task' AND user_id IN (?, ?) "
+                "AND entity_id IN (SELECT session_id FROM cockpit_moved_sessions)",
+                (target_sync_id, source["user_id"], source_sync_id),
+            )
+            counts["sync_metadata"] = cursor.rowcount
         db.commit()
     except Exception:
         db.rollback()
         raise
     finally:
         db.close()
-    return {"session_count": len(session_ids), "backup": str(backup), "tables": counts}
+    return {
+        "session_count": len(session_ids),
+        "backup": str(backup),
+        "tables": counts,
+        "skipped_tables": skipped_tables,
+    }
 
 
 def extract_email(value: Any) -> str | None:
@@ -893,6 +962,484 @@ def project_records() -> list[dict[str, Any]]:
     return records
 
 
+def validate_workspace_id(workspace_id: str) -> str:
+    """限制工作区 ID 为 Qoder 实际使用的目录/键名字符，阻断路径穿越。"""
+    value = workspace_id.strip()
+    if not value or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in value):
+        raise RuntimeError("工作区 ID 非法。")
+    return value
+
+
+def chat_history_key(workspace_id: str) -> str:
+    return f"lingma.chat.localHistory.{validate_workspace_id(workspace_id)}"
+
+
+def decode_workspace_path(document: dict[str, Any]) -> str:
+    """把 workspace.json 中的 file URI 转为适合展示的本机路径。"""
+    uri = str(document.get("folder") or document.get("workspace") or "")
+    if not uri:
+        return ""
+    parsed = urllib.parse.urlparse(uri)
+    path = urllib.parse.unquote(parsed.path if parsed.scheme == "file" else uri)
+    if os.name == "nt" and len(path) >= 3 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return path.replace("/", os.sep)
+
+
+def normalized_workspace_path(value: str) -> str:
+    return str(value or "").replace("\\", "/").rstrip("/").lower()
+
+
+def workspace_path_for_id(workspace_id: str) -> str:
+    directory = workspace_storage_root() / validate_workspace_id(workspace_id)
+    document = json_load(directory / "workspace.json", {})
+    return decode_workspace_path(document)
+
+
+def read_item_json(db_path: Path, key: str, default: Any) -> Any:
+    if not db_path.is_file():
+        return default
+    db = db_connect(db_path, True)
+    try:
+        try:
+            row = db.execute("SELECT value FROM ItemTable WHERE key = ?", (key,)).fetchone()
+        except sqlite3.OperationalError:
+            return default
+    finally:
+        db.close()
+    if row is None:
+        return default
+    value = row[0].decode("utf-8") if isinstance(row[0], bytes) else str(row[0])
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
+def write_item_json(db: sqlite3.Connection, key: str, value: Any) -> None:
+    db.execute(
+        "INSERT OR REPLACE INTO ItemTable(key, value) VALUES (?, ?)",
+        (key, json.dumps(value, ensure_ascii=False, separators=(",", ":"))),
+    )
+
+
+def workspace_state_db(workspace_id: str) -> Path:
+    root = workspace_storage_root().resolve()
+    path = (root / validate_workspace_id(workspace_id) / "state.vscdb").resolve()
+    if root not in path.parents:
+        raise RuntimeError("工作区路径越界。")
+    return path
+
+
+def chat_workspace_records() -> list[dict[str, Any]]:
+    """合并工作区目录与全局历史键，保留仅剩历史记录的工作区。"""
+    records: dict[str, dict[str, Any]] = {}
+    root = workspace_storage_root()
+    if root.is_dir():
+        for directory in root.iterdir():
+            if not directory.is_dir():
+                continue
+            workspace_id = directory.name
+            path = decode_workspace_path(json_load(directory / "workspace.json", {}))
+            name = Path(path).stem if path else workspace_id
+            records[workspace_id] = {"id": workspace_id, "name": name, "path": path}
+
+    state_db = qoder_state_db()
+    if state_db is not None:
+        db = db_connect(state_db, True)
+        try:
+            rows = db.execute(
+                "SELECT key FROM ItemTable WHERE key LIKE 'lingma.chat.localHistory.%'"
+            ).fetchall()
+        finally:
+            db.close()
+        prefix = "lingma.chat.localHistory."
+        for (key,) in rows:
+            workspace_id = str(key).removeprefix(prefix)
+            records.setdefault(workspace_id, {"id": workspace_id, "name": workspace_id, "path": ""})
+
+    for record in records.values():
+        record["chat_count"] = len(chat_records(record["id"]))
+    return sorted(records.values(), key=lambda item: (str(item["name"]).lower(), item["id"]))
+
+
+def chat_sort_timestamp(value: Any) -> float:
+    """把 IDE/Quest 可能使用的数字或 ISO 时间统一转换为毫秒时间戳。"""
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        text = str(value).strip()
+        try:
+            number = float(text)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.timestamp() * 1000
+            except ValueError:
+                return 0.0
+    # Qoder 历史通常使用毫秒，部分 Quest 数据可能使用秒；排序前统一单位避免两类记录错位。
+    return number * 1000 if abs(number) < 100_000_000_000 else number
+
+
+def chat_records(workspace_id: str) -> list[dict[str, Any]]:
+    state_db = qoder_state_db()
+    if state_db is None:
+        return []
+    value = read_item_json(state_db, chat_history_key(workspace_id), [])
+    records = value if isinstance(value, list) else []
+    workspace_path = normalized_workspace_path(workspace_path_for_id(workspace_id))
+    quest_snapshot = read_item_json(state_db, "aicoding.questTaskListSnapshot", {})
+    if isinstance(quest_snapshot, dict):
+        for folder_path, folder in (quest_snapshot.get("folders") or {}).items():
+            if not isinstance(folder, dict) or not workspace_path or normalized_workspace_path(folder_path) != workspace_path:
+                continue
+            for task in folder.get("tasks") or []:
+                if not isinstance(task, dict):
+                    continue
+                task_id = str(task.get("id") or "").strip()
+                if not task_id:
+                    continue
+                records.append({
+                    "id": task_id,
+                    "title": task.get("title") or task.get("name") or task.get("query") or "无标题 Quest",
+                    "context": [],
+                    "timestamp": task.get("updatedAtTimestamp") or task.get("updatedAt") or task.get("createTime") or 0,
+                    "sessionId": task.get("executionSessionId") or task.get("designSessionId") or "",
+                    "kind": "quest",
+                    "status": task.get("status") or "",
+                    "quest_type": task.get("questType") or "",
+                })
+    for record in records:
+        record.setdefault("kind", "chat")
+    # IDE 历史先读、Quest 后追加只是数据合并顺序，展示顺序必须按最近活动时间统一倒序。
+    return sorted(records, key=lambda item: chat_sort_timestamp(item.get("timestamp")), reverse=True)
+
+
+def chat_backup_document(workspace_id: str) -> dict[str, Any]:
+    workspace_id = validate_workspace_id(workspace_id)
+    workspace = next((item for item in chat_workspace_records() if item["id"] == workspace_id), None)
+    state_db = workspace_state_db(workspace_id)
+    records = chat_records(workspace_id)
+    return {
+        "format": "qoder-cockpit-chat-backup-v1",
+        "backup_time": now_iso(),
+        "workspace_id": workspace_id,
+        "workspace_path": workspace.get("path", "") if workspace else "",
+        "chat_history": [item for item in records if item.get("kind") != "quest"],
+        "quest_tasks": [item for item in records if item.get("kind") == "quest"],
+        "chat_views": read_item_json(state_db, "aicoding.chat.views", []),
+        "chat_tabs": read_item_json(state_db, "aicoding.chat.tabs", {"activeTabId": "", "tabs": []}),
+    }
+
+
+def save_chat_backup(workspace_id: str) -> Path:
+    document = chat_backup_document(workspace_id)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    destination = BACKUPS_ROOT / "chat" / f"{safe_name(workspace_id)}-{stamp}.json"
+    json_save(destination, document)
+    return destination
+
+
+def save_all_chat_backups() -> Path:
+    documents = [chat_backup_document(item["id"]) for item in chat_workspace_records()]
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    destination = BACKUPS_ROOT / "chat" / f"all-workspaces-{stamp}.json"
+    json_save(destination, documents)
+    return destination
+
+
+def chat_backup_records() -> list[dict[str, Any]]:
+    root = BACKUPS_ROOT / "chat"
+    records = []
+    # 备份目录中的单工作区和全量文件统一转换为列表项，供前端按时间查看与选择恢复范围。
+    for path in root.glob("*.json") if root.is_dir() else []:
+        value = json_load(path, None)
+        documents = value if isinstance(value, list) else [value]
+        documents = [item for item in documents if isinstance(item, dict)]
+        if not documents:
+            continue
+        records.append(
+            {
+                "name": path.name,
+                "backup_time": documents[0].get("backup_time", ""),
+                "workspace": documents[0].get("workspace_path") or documents[0].get("workspace_id", ""),
+                "workspace_id": documents[0].get("workspace_id", "") if len(documents) == 1 else "",
+                "workspace_ids": [str(item.get("workspace_id", "")) for item in documents if item.get("workspace_id")],
+                "workspace_count": len(documents),
+                "size": path.stat().st_size,
+            }
+        )
+    return sorted(records, key=lambda item: item["backup_time"], reverse=True)
+
+
+def chat_backup_path(name: str) -> Path:
+    root = (BACKUPS_ROOT / "chat").resolve()
+    path = (root / Path(name).name).resolve()
+    if path.parent != root or not path.is_file():
+        raise RuntimeError("备份文件不存在。")
+    return path
+
+
+def rebuild_chat_views(workspace_id: str, prune: bool = False) -> dict[str, int]:
+    """以历史记录为准补齐显示索引；删除场景同时清理已失效条目。"""
+    histories = chat_records(workspace_id)
+    latest: dict[str, dict[str, Any]] = {}
+    for chat in histories:
+        session_id = str(chat.get("sessionId") or chat.get("session_id") or "")
+        if session_id and chat_sort_timestamp(chat.get("timestamp")) >= chat_sort_timestamp(latest.get(session_id, {}).get("timestamp")):
+            latest[session_id] = chat
+    state_path = workspace_state_db(workspace_id)
+    if not state_path.is_file():
+        return {"views_added": 0, "tabs_added": 0}
+
+    views = read_item_json(state_path, "aicoding.chat.views", [])
+    tabs_document = read_item_json(state_path, "aicoding.chat.tabs", {"activeTabId": "", "tabs": []})
+    views = views if isinstance(views, list) else []
+    tabs_document = tabs_document if isinstance(tabs_document, dict) else {"activeTabId": "", "tabs": []}
+    tabs = tabs_document.get("tabs") if isinstance(tabs_document.get("tabs"), list) else []
+    if prune:
+        views = [item for item in views if str(item.get("sessionId", "")) in latest]
+        tabs = [item for item in tabs if str(item.get("sessionId", "")) in latest]
+    view_ids = {str(item.get("sessionId", "")) for item in views}
+    tab_ids = {str(item.get("sessionId", "")) for item in tabs}
+    added_views = added_tabs = 0
+    for session_id, chat in latest.items():
+        title = str(chat.get("title") or f"会话 {session_id[:8]}")
+        if session_id not in view_ids:
+            views.append({"active": False, "id": session_id, "location": "auxiliaryBar", "sessionId": session_id, "sessionType": "assistant", "targetRemoteAuthority": None, "title": title, "viewId": str(uuid4())})
+            added_views += 1
+        if session_id not in tab_ids:
+            tabs.append({"sessionId": session_id, "tabId": str(uuid4()), "targetRemoteAuthority": None, "title": title})
+            added_tabs += 1
+    tabs_document["tabs"] = tabs
+    db = db_connect(state_path)
+    try:
+        db.execute("CREATE TABLE IF NOT EXISTS ItemTable(key TEXT PRIMARY KEY ON CONFLICT REPLACE, value BLOB)")
+        write_item_json(db, "aicoding.chat.views", views)
+        write_item_json(db, "aicoding.chat.tabs", tabs_document)
+        db.commit()
+    finally:
+        db.close()
+    return {"views_added": added_views, "tabs_added": added_tabs}
+
+
+def restore_chat_backup(name: str, target_workspace_id: str | None = None) -> dict[str, Any]:
+    value = json_load(chat_backup_path(name), None)
+    documents = value if isinstance(value, list) else [value]
+    if not all(isinstance(item, dict) for item in documents):
+        raise RuntimeError("备份文件格式无效。")
+    if target_workspace_id:
+        # 指定目标时必须从备份中精确匹配工作区，禁止把全量备份的首个工作区误写到当前工作区。
+        matched = [item for item in documents if str(item.get("workspace_id", "")) == target_workspace_id]
+        if not matched:
+            if len(documents) == 1 and not documents[0].get("workspace_id"):
+                matched = documents
+            else:
+                raise RuntimeError("备份中找不到指定工作区，未执行恢复。")
+        documents = matched
+
+    restored = 0
+    restored_workspaces: list[tuple[str, dict[str, Any]]] = []
+    state_path = qoder_state_db()
+    if state_path is None:
+        raise RuntimeError("找不到 Qoder state.vscdb。")
+    # 恢复会覆盖目标工作区，先生成可从“备份”视图再次选择的完整会话快照。
+    restore_targets = {
+        validate_workspace_id(target_workspace_id or str(document.get("workspace_id", "")))
+        for document in documents
+    }
+    for workspace_id in restore_targets:
+        save_chat_backup(workspace_id)
+    backup_session_database(state_path)
+    db = db_connect(state_path)
+    try:
+        # 全局历史作为一次事务写入，避免批量恢复只完成一部分。
+        db.execute("BEGIN IMMEDIATE")
+        snapshot = read_item_json(state_path, "aicoding.questTaskListSnapshot", {})
+        snapshot_changed = False
+        for document in documents:
+            workspace_id = validate_workspace_id(target_workspace_id or str(document.get("workspace_id", "")))
+            history = document.get("chat_history", [])
+            if not isinstance(history, list):
+                raise RuntimeError("备份中的对话记录格式无效。")
+            write_item_json(db, chat_history_key(workspace_id), history)
+            quest_tasks = document.get("quest_tasks", [])
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("folders"), dict) and isinstance(quest_tasks, list):
+                target_path = normalized_workspace_path(workspace_path_for_id(workspace_id) or document.get("workspace_path", ""))
+                folder = next((item for path, item in snapshot["folders"].items() if normalized_workspace_path(path) == target_path), None)
+                if isinstance(folder, dict) and isinstance(folder.get("tasks"), list):
+                    # 备份代表目标工作区的完整快照：先清空现有 Quest，再按备份记录重建，避免旧任务残留。
+                    folder["tasks"] = [
+                        {"id": str(quest.get("id", "")), "title": quest.get("title", ""), "name": quest.get("title", ""), "status": quest.get("status", ""), "updatedAtTimestamp": quest.get("timestamp", 0), "createTime": quest.get("timestamp", 0), "executionSessionId": quest.get("sessionId", ""), "questType": quest.get("quest_type", "agent")}
+                        for quest in quest_tasks
+                        if str(quest.get("id", ""))
+                    ]
+                    snapshot_changed = True
+            restored_workspaces.append((workspace_id, document))
+            restored += len(history)
+        if snapshot_changed:
+            write_item_json(db, "aicoding.questTaskListSnapshot", snapshot)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+    for workspace_id, document in restored_workspaces:
+        # workspaceStorage 中的 views/tabs 决定 IDE 是否展示会话，恢复快照时与全局历史一起写回。
+        workspace_db = workspace_state_db(workspace_id)
+        if workspace_db.is_file() and ("chat_views" in document or "chat_tabs" in document):
+            view_db = db_connect(workspace_db)
+            try:
+                view_db.execute("BEGIN IMMEDIATE")
+                if "chat_views" in document:
+                    write_item_json(view_db, "aicoding.chat.views", document.get("chat_views", []))
+                if "chat_tabs" in document:
+                    write_item_json(view_db, "aicoding.chat.tabs", document.get("chat_tabs", {"activeTabId": "", "tabs": []}))
+                view_db.commit()
+            finally:
+                view_db.close()
+        rebuild_chat_views(workspace_id, prune=True)
+    return {"workspace_count": len(documents), "chat_count": restored}
+
+
+def delete_chats(workspace_id: str, chat_ids: list[str]) -> dict[str, int]:
+    ids = {str(item) for item in chat_ids if str(item)}
+    if not ids:
+        raise RuntimeError("没有选择要删除的对话。")
+    save_chat_backup(workspace_id)
+    histories = chat_records(workspace_id)
+    # IDE 记录写回历史键，Quest 记录只清理当前工作区对应的 folder，避免同 ID 任务跨工作区被误删。
+    remaining = [chat for chat in histories if str(chat.get("id", "")) not in ids]
+    chat_remaining = [chat for chat in remaining if chat.get("kind") != "quest"]
+    quest_ids = {str(chat.get("id", "")) for chat in histories if chat.get("kind") == "quest" and str(chat.get("id", "")) in ids}
+    state_path = qoder_state_db()
+    if state_path is None:
+        raise RuntimeError("找不到 Qoder state.vscdb。")
+    db = db_connect(state_path)
+    try:
+        write_item_json(db, chat_history_key(workspace_id), chat_remaining)
+        if quest_ids:
+            snapshot = read_item_json(state_path, "aicoding.questTaskListSnapshot", {})
+            if isinstance(snapshot, dict):
+                workspace_path = normalized_workspace_path(workspace_path_for_id(workspace_id))
+                for folder_path, folder in (snapshot.get("folders") or {}).items():
+                    if workspace_path and normalized_workspace_path(folder_path) != workspace_path:
+                        continue
+                    if isinstance(folder, dict) and isinstance(folder.get("tasks"), list):
+                        folder["tasks"] = [task for task in folder["tasks"] if str(task.get("id", "")) not in quest_ids]
+                write_item_json(db, "aicoding.questTaskListSnapshot", snapshot)
+        db.commit()
+    finally:
+        db.close()
+    rebuild_chat_views(workspace_id, prune=True)
+    return {"deleted": len(histories) - len(remaining), "remaining": len(remaining)}
+
+
+def merge_chat_workspaces(source_id: str, target_id: str) -> dict[str, Any]:
+    source_id, target_id = validate_workspace_id(source_id), validate_workspace_id(target_id)
+    if source_id == target_id:
+        raise RuntimeError("来源与目标工作区不能相同。")
+    source_backup, target_backup = save_chat_backup(source_id), save_chat_backup(target_id)
+    source_all, target_all = chat_records(source_id), chat_records(target_id)
+    source = [item for item in source_all if item.get("kind") != "quest"]
+    target = [item for item in target_all if item.get("kind") != "quest"]
+    target_ids = {str(item.get("id", "")) for item in target}
+    additions = [item for item in source if str(item.get("id", "")) not in target_ids]
+    source_quests = [item for item in source_all if item.get("kind") == "quest"]
+    state_path = qoder_state_db()
+    if state_path is None:
+        raise RuntimeError("找不到 Qoder state.vscdb。")
+    quest_snapshot = read_item_json(state_path, "aicoding.questTaskListSnapshot", {})
+    source_folder = target_folder = None
+    if source_quests:
+        folders = quest_snapshot.get("folders") if isinstance(quest_snapshot, dict) else None
+        source_path = normalized_workspace_path(workspace_path_for_id(source_id))
+        target_path = normalized_workspace_path(workspace_path_for_id(target_id))
+        source_folder = next((folder for path, folder in (folders or {}).items() if normalized_workspace_path(path) == source_path), None)
+        target_folder = next((folder for path, folder in (folders or {}).items() if normalized_workspace_path(path) == target_path), None)
+        if not (isinstance(source_folder, dict) and isinstance(source_folder.get("tasks"), list) and isinstance(target_folder, dict) and isinstance(target_folder.get("tasks"), list)):
+            raise RuntimeError("源或目标工作区缺少 Quest 任务索引，未执行合并。")
+
+    db = db_connect(state_path)
+    try:
+        # IDE 历史与 Quest 索引必须同一事务提交，避免出现“对话已合并但 Quest 仍留在源工作区”。
+        db.execute("BEGIN IMMEDIATE")
+        write_item_json(db, chat_history_key(target_id), target + additions)
+        write_item_json(db, chat_history_key(source_id), [])
+        moved_quests = 0
+        if source_quests:
+            target_quest_ids = {str(task.get("id", "")) for task in target_folder["tasks"]}
+            source_quest_ids = {str(item.get("id", "")) for item in source_quests}
+            for task in list(source_folder["tasks"]):
+                task_id = str(task.get("id", ""))
+                if task_id in source_quest_ids:
+                    if task_id not in target_quest_ids:
+                        target_folder["tasks"].append(task)
+                        target_quest_ids.add(task_id)
+                    source_folder["tasks"].remove(task)
+                    moved_quests += 1
+            write_item_json(db, "aicoding.questTaskListSnapshot", quest_snapshot)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+    rebuild_chat_views(source_id, prune=True)
+    rebuild_chat_views(target_id, prune=True)
+    return {"merged": len(additions) + moved_quests, "skipped": len(source) - len(additions), "target_total": len(target) + len(additions) + moved_quests, "source_backup": str(source_backup), "target_backup": str(target_backup)}
+
+
+def delete_chat_workspace(workspace_id: str) -> dict[str, Any]:
+    workspace_id = validate_workspace_id(workspace_id)
+    backup = save_chat_backup(workspace_id)
+    # 同时按任务 ID 清理全局 Quest 快照；workspaceStorage 目录删除本身不会触碰这个全局索引。
+    quest_ids = {str(item.get("id", "")) for item in chat_records(workspace_id) if item.get("kind") == "quest"}
+    state_path = qoder_state_db()
+    if state_path is None:
+        raise RuntimeError("找不到 Qoder state.vscdb。")
+    db = db_connect(state_path)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("DELETE FROM ItemTable WHERE key = ?", (chat_history_key(workspace_id),))
+        snapshot = read_item_json(state_path, "aicoding.questTaskListSnapshot", {})
+        if quest_ids and isinstance(snapshot, dict) and isinstance(snapshot.get("folders"), dict):
+            workspace_path = normalized_workspace_path(workspace_path_for_id(workspace_id))
+            for folder_path, folder in snapshot["folders"].items():
+                if workspace_path and normalized_workspace_path(folder_path) != workspace_path:
+                    continue
+                if isinstance(folder, dict) and isinstance(folder.get("tasks"), list):
+                    folder["tasks"] = [task for task in folder["tasks"] if str(task.get("id", "")) not in quest_ids]
+            write_item_json(db, "aicoding.questTaskListSnapshot", snapshot)
+        db.commit()
+    finally:
+        db.close()
+    root = workspace_storage_root().resolve()
+    directory = (root / workspace_id).resolve()
+    deleted = False
+    if root in directory.parents and directory.is_dir():
+        shutil.rmtree(directory)
+        deleted = True
+    return {"backup": str(backup), "directory_deleted": deleted}
+
+
+def export_chats_markdown() -> bytes:
+    lines = ["# Qoder 对话记录", "", f"导出时间：{now_iso()}", ""]
+    # 导出沿用会话列表的统一时间解析，保证 Quest 的秒级或 ISO 时间不会阻塞整份 Markdown 下载。
+    for workspace in chat_workspace_records():
+        lines.extend([f"## {workspace['name']}", "", f"工作区：`{workspace['path'] or workspace['id']}`", ""])
+        for chat in chat_records(workspace["id"]):
+            timestamp = chat_sort_timestamp(chat.get("timestamp"))
+            when = datetime.fromtimestamp(timestamp / 1000, timezone.utc).astimezone().isoformat(timespec="minutes") if timestamp else "未知"
+            lines.extend([f"### {chat.get('title') or '无标题'}", "", f"- 时间：{when}", f"- 会话 ID：`{chat.get('sessionId') or chat.get('session_id') or ''}`", f"- 上下文数量：{len(chat.get('context') or [])}", ""])
+    return "\n".join(lines).encode("utf-8")
+
+
 def public_account(account: dict[str, Any]) -> dict[str, Any]:
     copy = dict(account)
     copy.pop("values", None)
@@ -910,6 +1457,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def send_download(self, content: bytes, filename: str, content_type: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
     def read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         return json.loads(self.rfile.read(length) or b"{}")
@@ -924,6 +1479,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"accounts": [public_account(item) for item in load_accounts()], "current": public_account(current) if current else None})
             elif parsed.path == "/api/projects":
                 self.send_json({"projects": project_records()})
+            elif parsed.path == "/api/chat/workspaces":
+                self.send_json({"workspaces": chat_workspace_records()})
+            elif parsed.path == "/api/chat/list":
+                workspace_id = urllib.parse.parse_qs(parsed.query).get("workspace_id", [""])[0]
+                self.send_json({"chats": chat_records(workspace_id)})
+            elif parsed.path == "/api/chat/backups":
+                self.send_json({"backups": chat_backup_records()})
+            elif parsed.path == "/api/chat/export":
+                self.send_download(export_chats_markdown(), "qoder-chats.md", "text/markdown; charset=utf-8")
             elif parsed.path == "/api/health":
                 self.send_json({"ok": True, "qoder_running": is_qoder_running()})
             elif parsed.path == "/api/oauth/status":
@@ -1012,8 +1576,6 @@ class Handler(BaseHTTPRequestHandler):
                 source_id = str(payload.get("source_account_id", ""))
                 if not any(item.get("id") == target_id for item in load_accounts()):
                     raise RuntimeError("目标账号不存在，请先导入账号。")
-                # 切号前自动关闭 Qoder，释放 state.vscdb；只发送正常退出请求，不强制终止未保存的进程。
-                was_running = stop_qoder()
                 projects = [Path(item["path"]) for item in project_records()]
                 saved = []
                 state_db = qoder_state_db()
@@ -1023,6 +1585,14 @@ class Handler(BaseHTTPRequestHandler):
                 source_account = next((item for item in load_accounts() if item.get("id") == source_id), None)
                 if source_id and payload.get("inherit_sessions", True) and source_account is None:
                     raise RuntimeError("来源账号不存在，无法继承历史会话。")
+                session_db: Path | None = None
+                if source_id and payload.get("inherit_sessions", True):
+                    session_db = qoder_session_db()
+                    if session_db is None:
+                        raise RuntimeError("找不到 Qoder 本地会话数据库 local.db，无法同步 IDE 历史会话。")
+                    validate_local_session_database(session_db)
+                # 基础会话库预检通过后才关闭 Qoder，避免不兼容版本仅因检查失败就中断当前工作状态。
+                was_running = stop_qoder()
                 backup_db = BACKUPS_ROOT / "state" / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.vscdb"
                 backup_db.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(state_db, backup_db)
@@ -1033,22 +1603,33 @@ class Handler(BaseHTTPRequestHandler):
                     for project in projects:
                         saved.append(snapshot_project(source_id, project))
                     source_state_db = snapshot_session_state(source_id, state_db)
-                write_state_values(state_db, target["values"])
                 restored = []
                 restored_state_rows = 0
                 local_sessions: dict[str, Any] | None = None
-                if source_id and payload.get("inherit_sessions", True):
-                    if source_state_db is None:
-                        raise RuntimeError("来源账号没有可用的会话状态快照，请先登录该账号并保存一次会话。")
-                    source_state_rows = read_session_state_rows(source_state_db)
-                    restored_state_rows = write_session_state_rows(state_db, source_state_rows, target["values"])
-                    for project in projects:
-                        restored.append({"project": str(project), **restore_project(source_id, project)})
-                    session_db = qoder_session_db()
-                    if session_db is None:
-                        raise RuntimeError("找不到 Qoder 本地会话数据库 local.db，无法同步 IDE 历史会话。")
-                    # Chat/Quest 列表最终由 Cosy 的 local.db 按 user_id 查询，文件和 state.vscdb 恢复后还需迁移数据库归属。
-                    local_sessions = rebind_local_sessions(session_db, source_account["values"], target["values"])
+                try:
+                    write_state_values(state_db, target["values"])
+                    if source_id and payload.get("inherit_sessions", True):
+                        if source_state_db is None:
+                            raise RuntimeError("来源账号没有可用的会话状态快照，请先登录该账号并保存一次会话。")
+                        source_state_rows = read_session_state_rows(source_state_db)
+                        restored_state_rows = write_session_state_rows(state_db, source_state_rows, target["values"])
+                        for project in projects:
+                            restored.append({"project": str(project), **restore_project(source_id, project)})
+                        # 基础 Chat 表必迁移，Quest/Agent 扩展表按当前 Qoder 安装能力选择性迁移。
+                        local_sessions = rebind_local_sessions(session_db, source_account["values"], target["values"])
+                except Exception as exc:
+                    # 迁移事务失败时恢复完整账号状态，避免 Qoder 留在“目标账号凭据 + 来源账号会话”的半完成状态。
+                    shutil.copy2(backup_db, state_db)
+                    restart_error = None
+                    if was_running:
+                        try:
+                            launch_qoder()
+                        except Exception as restart_exc:
+                            restart_error = str(restart_exc)
+                    message = f"切换失败，已恢复原账号状态：{exc}"
+                    if restart_error:
+                        message += f"；Qoder 自动重启失败：{restart_error}"
+                    raise RuntimeError(message) from exc
                 launched = launch_qoder()
                 self.send_json(
                     {
@@ -1078,6 +1659,58 @@ class Handler(BaseHTTPRequestHandler):
                 require_qoder_stopped(bool(payload.get("allow_running")))
                 project = Path(str(payload.get("project_path", ""))).resolve()
                 self.send_json(restore_project(str(payload.get("account_id", "")), project))
+            elif self.path == "/api/chat/backup":
+                was_running = stop_qoder()
+                try:
+                    path = save_all_chat_backups() if payload.get("all") else save_chat_backup(str(payload.get("workspace_id", "")))
+                finally:
+                    if was_running:
+                        launch_qoder()
+                self.send_json({"path": str(path), "name": path.name})
+            elif self.path == "/api/chat/restore":
+                was_running = stop_qoder()
+                try:
+                    result = restore_chat_backup(str(payload.get("name", "")), str(payload.get("target_workspace_id", "")).strip() or None)
+                finally:
+                    if was_running:
+                        launch_qoder()
+                self.send_json(result)
+            elif self.path == "/api/chat/delete":
+                was_running = stop_qoder()
+                try:
+                    result = delete_chats(str(payload.get("workspace_id", "")), payload.get("chat_ids", []))
+                finally:
+                    if was_running:
+                        launch_qoder()
+                self.send_json(result)
+            elif self.path == "/api/chat/repair":
+                was_running = stop_qoder()
+                try:
+                    result = rebuild_chat_views(str(payload.get("workspace_id", "")), prune=False)
+                finally:
+                    if was_running:
+                        launch_qoder()
+                self.send_json(result)
+            elif self.path == "/api/chat/merge":
+                was_running = stop_qoder()
+                try:
+                    result = merge_chat_workspaces(str(payload.get("source_workspace_id", "")), str(payload.get("target_workspace_id", "")))
+                finally:
+                    if was_running:
+                        launch_qoder()
+                self.send_json(result)
+            elif self.path == "/api/chat/workspace/delete":
+                was_running = stop_qoder()
+                try:
+                    result = delete_chat_workspace(str(payload.get("workspace_id", "")))
+                finally:
+                    if was_running:
+                        launch_qoder()
+                self.send_json(result)
+            elif self.path == "/api/chat/backup/delete":
+                path = chat_backup_path(str(payload.get("name", "")))
+                path.unlink()
+                self.send_json({"deleted": path.name})
             else:
                 self.send_error(404)
         except RuntimeError as exc:

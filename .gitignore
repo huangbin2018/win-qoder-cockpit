@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.qoder/
 
 # 本地配置、日志和编辑器文件
 .env

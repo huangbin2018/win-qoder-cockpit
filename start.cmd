@@ -1,10 +1,21 @@
 @echo off
-setlocal
-cd /d "%~dp0"
+setlocal EnableExtensions
+
+rem ½«¹¤×÷Ä¿Â¼¹Ì¶¨µ½½Å±¾ËùÔÚÄ¿Â¼£¬¼æÈÝ°üº¬¿Õ¸ñµÄÂ·¾¶¡£
+cd /d "%~dp0" || exit /b 1
+
+where powershell.exe >nul 2>&1
+if errorlevel 1 (
+  echo Æô¶¯ Qoder Cockpit ÐèÒª PowerShell¡£
+  exit /b 1
+)
+
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start.ps1" %*
 if errorlevel 1 (
   echo.
-  echo Qoder Cockpit å¯åŠ¨å¤±è´¥ï¼ŒæŒ‰ä»»æ„é”®é€€å‡ºã€‚
+  echo Qoder Cockpit Æô¶¯Ê§°Ü£¬°´ÈÎÒâ¼üÍË³ö¡£
   pause >nul
+  exit /b 1
 )
+
 endlocal
