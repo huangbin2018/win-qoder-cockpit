@@ -154,6 +154,32 @@ def oauth_expire_timestamp(value: Any) -> str | None:
         return text
 
 
+def apply_qoder_auth_status(user_info: dict[str, Any]) -> bool:
+    """把 OpenAPI 的白名单状态转换为 Qoder 本地认证同步使用的枚举值。"""
+    whitelist_values = {
+        "PASS": 3,
+        "WAIT": 2,
+        "NoLicense": 5,
+        "NoQuota": 6,
+        "EXPIRED": 6,
+        "NotAllow": 7,
+        "NOT_ALLOW": 7,
+    }
+    status_name = user_info.get("whitelistStatus")
+    whitelist = whitelist_values.get(status_name)
+    if whitelist is None:
+        return False
+    changed = False
+    # Qoder 的 AUTHORIZED=2 与 PASS=3 等本地枚举不是 OpenAPI 返回的字段；缺失时 Go 客户端会按未登录处理。
+    if user_info.get("status") is None:
+        user_info["status"] = 2
+        changed = True
+    if user_info.get("whitelist") is None:
+        user_info["whitelist"] = whitelist
+        changed = True
+    return changed
+
+
 def oauth_build_login_url(nonce: str, challenge: str) -> str:
     query = {
         "nonce": nonce,
@@ -186,6 +212,7 @@ def oauth_fetch_account(state: dict[str, Any], token_data: dict[str, Any]) -> di
         **user_info,
     }
     info.update({key: value for key, value in user_status.items() if value is not None})
+    apply_qoder_auth_status(info)
     # Qoder 客户端同时读取 token 与 securityOauthToken；两者必须指向同一个 access token。
     info["token"] = token
     info["securityOauthToken"] = token
@@ -208,6 +235,7 @@ def refresh_account_quota(account: dict[str, Any]) -> dict[str, Any]:
     plan = oauth_json_request(f"{OAUTH_OPENAPI_BASE}/api/v2/user/plan", headers) or {}
     usage = oauth_json_request(f"{OAUTH_OPENAPI_BASE}/api/v2/quota/usage", headers) or {}
     info.update({key: value for key, value in status.items() if value is not None})
+    apply_qoder_auth_status(info)
     info["token"] = token
     info["securityOauthToken"] = token
     values = {**values, SECRET_KEYS[0]: info, SECRET_KEYS[1]: plan, SECRET_KEYS[2]: usage}
@@ -326,6 +354,7 @@ def qoder_executable() -> Path | None:
     configured = os.environ.get("QODER_APP_PATH")
     candidates = [
         Path(configured) if configured else None,
+        # 账号切换后继续启动旧版 Quest 客户端；新版 Qoder 由用户自行打开并读取共享账号状态。
         Path(os.environ.get("ProgramFiles", "")) / "Qoder IDE" / "Qoder.exe",
         Path(os.environ.get("ProgramFiles", "")) / "Qoder IDE" / "Qoder IDE.exe",
         Path(os.environ.get("ProgramFiles", "")) / "Qoder IDE" / "resources" / "app" / "resources" / "bin" / "x86_64_windows" / "Qoder.exe",
@@ -337,17 +366,19 @@ def qoder_executable() -> Path | None:
 
 def is_qoder_running() -> bool:
     if os.name == "nt":
-        # Qoder IDE.exe 是桌面主进程，Qoder.exe 是其本地会话服务；任一存活都说明会话库仍可能被占用。
-        for image_name in ("Qoder IDE.exe", "Qoder.exe"):
-            result = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if image_name.lower() in result.stdout.lower():
-                return True
-        return False
+        # 只把实际安装目录中的桌面主进程视为运行；IDE 自带的 Go 会话服务不应阻止状态切换。
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'Qoder IDE.exe' -and $_.ExecutablePath -like '*\\Program Files\\Qoder IDE\\Qoder IDE.exe') -or ($_.Name -eq 'Qoder.exe' -and ($_.ExecutablePath -like '*\\Program Files\\Qoder\\Qoder.exe' -or $_.ExecutablePath -like '*\\Programs\\Qoder\\Qoder.exe')) } | Select-Object -First 1",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return bool(result.stdout.strip())
     result = subprocess.run(["pgrep", "-f", "[Q]oder"], capture_output=True, text=True, check=False)
     return bool(result.stdout.strip())
 
@@ -357,15 +388,14 @@ def stop_qoder(timeout: float = 20.0) -> bool:
     if not is_qoder_running():
         return False
     if os.name == "nt":
-        # 先向桌面窗口发送正常关闭消息，让 Qoder 落盘 SQLite/WAL；超时后再结束完整 IDE 进程树。
+        # 两个客户端共享 state.vscdb 和 local.db；改写前只关闭安装目录根程序，子进程由根程序退出带走。
         subprocess.run(
             [
                 "powershell",
                 "-NoProfile",
                 "-Command",
-                "Get-Process -Name 'Qoder IDE' -ErrorAction SilentlyContinue | "
-                "Where-Object { $_.MainWindowHandle -ne 0 } | "
-                "ForEach-Object { [void]$_.CloseMainWindow() }",
+                "$roots = Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'Qoder IDE.exe' -and $_.ExecutablePath -like '*\\Program Files\\Qoder IDE\\Qoder IDE.exe') -or ($_.Name -eq 'Qoder.exe' -and ($_.ExecutablePath -like '*\\Program Files\\Qoder\\Qoder.exe' -or $_.ExecutablePath -like '*\\Programs\\Qoder\\Qoder.exe')) }; "
+                "$roots | ForEach-Object { $p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; if ($p -and $p.MainWindowHandle -ne 0) { [void]$p.CloseMainWindow() } }",
             ],
             capture_output=True,
             text=True,
@@ -375,13 +405,19 @@ def stop_qoder(timeout: float = 20.0) -> bool:
         while time.time() < graceful_deadline and is_qoder_running():
             time.sleep(0.25)
         if is_qoder_running():
-            for image_name in ("Qoder IDE.exe", "Qoder.exe"):
-                subprocess.run(
-                    ["taskkill", "/IM", image_name, "/T", "/F"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+            # 超时后按客户端安装路径逐个结束进程树，防止按进程名误关另一个安装实例。
+            subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "$roots = Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'Qoder IDE.exe' -and $_.ExecutablePath -like '*\\Program Files\\Qoder IDE\\Qoder IDE.exe') -or ($_.Name -eq 'Qoder.exe' -and ($_.ExecutablePath -like '*\\Program Files\\Qoder\\Qoder.exe' -or $_.ExecutablePath -like '*\\Programs\\Qoder\\Qoder.exe')) }; "
+                    "foreach ($root in $roots) { & taskkill /PID $root.ProcessId /T /F | Out-Null }",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
     else:
         subprocess.run(["pkill", "-TERM", "-f", "[Q]oder"], capture_output=True, check=False)
     deadline = time.time() + timeout
@@ -396,7 +432,15 @@ def launch_qoder() -> Path:
     executable = qoder_executable()
     if executable is None:
         raise RuntimeError("找不到 Qoder.exe。请设置 QODER_APP_PATH 环境变量后重试。")
-    subprocess.Popen([str(executable), "--reuse-window"], close_fds=True)
+    # Cockpit 可能由开发工具启动；清除其注入的 Node/Codex 变量，避免 IDE 扩展宿主误用外部运行时。
+    child_env = os.environ.copy()
+    injected_prefixes = ("CODEX_", "NODE_REPL_")
+    injected_names = {"ELECTRON_RUN_AS_NODE", "NODE_OPTIONS", "NODE_PATH", "VSCODE_IPC_HOOK_CLI"}
+    for name in tuple(child_env):
+        if name.startswith(injected_prefixes) or name in injected_names:
+            child_env.pop(name, None)
+    # 按开始菜单快捷方式从安装目录启动，不传 --reuse-window，避免复用旧窗口连接状态。
+    subprocess.Popen([str(executable)], cwd=str(executable.parent), env=child_env, close_fds=True)
     return executable
 
 
@@ -838,6 +882,8 @@ def load_accounts() -> list[dict[str, Any]]:
             info = values.get(SECRET_KEYS[0]) if isinstance(values, dict) else None
             if not isinstance(info, dict):
                 continue
+            if apply_qoder_auth_status(info):
+                changed = True
             token = info.get("token") or info.get("securityOauthToken")
             if token and not info.get("securityOauthToken"):
                 info["securityOauthToken"] = token
@@ -1455,7 +1501,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            # 页面在切号完成后关闭连接时，账号和会话已写入成功；断开的响应不应改报为切换失败。
+            return
 
     def send_download(self, content: bytes, filename: str, content_type: str) -> None:
         self.send_response(200)

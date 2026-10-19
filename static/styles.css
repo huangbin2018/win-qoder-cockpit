@@ -550,7 +550,7 @@ h2 {
 }
 .account-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) minmax(205px, 54%);
   align-items: center;
   gap: var(--space-3);
   width: 100%;
@@ -600,28 +600,51 @@ h2 {
 .account-row .ar-side {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
-  gap: var(--space-1);
+  gap: 4px;
+  min-width: 0;
+  align-self: stretch;
+  justify-content: center;
 }
-.mini-track {
-  width: 96px;
+.account-quota-track {
+  width: 100%;
   height: 6px;
-  border-radius: 999px;
-  background: var(--color-surface-subtle);
+  background: repeating-linear-gradient(
+    to right,
+    var(--color-surface-subtle) 0 4px,
+    transparent 4px 8px
+  );
   overflow: hidden;
 }
-.mini-track span {
+.account-quota-track span {
   display: block;
   height: 100%;
-  background: var(--color-primary);
-  border-radius: inherit;
+  background: linear-gradient(90deg, #22c55e 0%, #eab308 58%, #ef4444 100%);
   transition: width 0.3s ease;
 }
-.mini-track.is-low span {
-  background: var(--color-warning);
+.account-quota-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
-.mini-track.is-empty span {
-  background: var(--color-danger);
+.account-quota-used {
+  min-width: 0;
+  white-space: nowrap;
+}
+.account-quota-used > span {
+  color: var(--color-text-muted);
+}
+.account-quota-remaining {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.account-quota-remaining b {
+  color: var(--color-text);
+  font: 600 12px var(--font-mono);
 }
 .account-detail {
   border: 1px solid var(--color-border);
@@ -1362,6 +1385,9 @@ h2 {
   .account-layout {
     grid-template-columns: 1fr;
   }
+  .account-row {
+    grid-template-columns: auto minmax(0, 1fr) minmax(205px, 42%);
+  }
   .session-layout {
     grid-template-columns: 1fr;
   }
@@ -1387,6 +1413,18 @@ h2 {
 @media (max-width: 640px) {
   .app-main {
     padding: var(--space-4) var(--space-3) var(--space-8);
+  }
+  .account-row {
+    grid-template-columns: auto minmax(0, 1fr) minmax(145px, 48%);
+  }
+  .account-quota-summary {
+    flex-wrap: wrap;
+  }
+  .account-quota-used {
+    white-space: normal;
+  }
+  .account-quota-remaining {
+    margin-left: auto;
   }
   .metric-strip {
     grid-template-columns: 1fr;

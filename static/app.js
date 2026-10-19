@@ -44,6 +44,29 @@ function quotaPercent(account) {
     : null;
 }
 
+function creditsNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function formatCredits(value) {
+  const number = creditsNumber(value);
+  return number === null
+    ? "—"
+    : new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(number);
+}
+
+function quotaUsedPercent(account) {
+  const total = creditsNumber(account.credits_total);
+  const used = creditsNumber(account.credits_used);
+  if (total > 0 && used !== null) {
+    return Math.max(0, Math.min(100, (used / total) * 100));
+  }
+  const remaining = quotaPercent(account);
+  return remaining === null ? null : 100 - remaining;
+}
+
 function quotaUpdatedLabel(account) {
   const value = account.quota_refreshed_at || account.updated_at;
   return value
@@ -457,13 +480,22 @@ function renderAccountList() {
     renderIcons();
     return;
   }
+  // 额度未知的账号排在末尾；已知额度按剩余 credits 从高到低展示。
+  const sortedAccounts = [...appState.accounts].sort((a, b) => {
+    const remainingA = creditsNumber(a.credits_remaining);
+    const remainingB = creditsNumber(b.credits_remaining);
+    if (remainingA === null) return remainingB === null ? 0 : 1;
+    if (remainingB === null) return -1;
+    return remainingB - remainingA;
+  });
   if (!appState.selectedAccountId || !appState.accounts.some((a) => a.id === appState.selectedAccountId)) {
-    appState.selectedAccountId = appState.current?.id || appState.accounts[0].id;
+    appState.selectedAccountId = appState.current?.id || sortedAccounts[0].id;
   }
-  list.innerHTML = appState.accounts
+  list.innerHTML = sortedAccounts
     .map((account) => {
       const isCurrent = appState.current?.id === account.id || appState.current?.email === account.email;
-      const percent = quotaPercent(account);
+      const remainingPercent = quotaPercent(account);
+      const usedPercent = quotaUsedPercent(account);
       return `<button type="button" class="account-row ${account.id === appState.selectedAccountId ? "is-selected" : ""}" data-account-id="${escapeHtml(account.id)}">
         <span class="avatar" aria-hidden="true">${initialsOf(account)}</span>
         <span class="ar-main">
@@ -475,8 +507,11 @@ function renderAccountList() {
           </span>
         </span>
         <span class="ar-side">
-          <span class="mini-track ${trackTone(percent)}" aria-label="剩余额度 ${percent === null ? "未知" : percent.toFixed(1) + "%"}"><span style="width:${percent === null ? 0 : percent}%"></span></span>
-          <span style="font:600 12px var(--font-mono);color:var(--color-text-muted);">${percent === null ? "—" : percent.toFixed(1) + "%"}</span>
+          <span class="account-quota-track ${trackTone(remainingPercent)}" role="img" aria-label="已使用额度 ${usedPercent === null ? "未知" : Math.round(usedPercent) + "%"}"><span style="width:${usedPercent === null ? 0 : usedPercent}%"></span></span>
+          <span class="account-quota-summary">
+            <span class="account-quota-used">${escapeHtml(formatCredits(account.credits_used))} / ${escapeHtml(formatCredits(account.credits_total))} <span>（已使用 ${usedPercent === null ? "—" : Math.round(usedPercent) + "%"}）</span></span>
+            <span class="account-quota-remaining">剩余 <b>${escapeHtml(formatCredits(account.credits_remaining))}</b></span>
+          </span>
         </span>
       </button>`;
     })
