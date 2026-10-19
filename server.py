@@ -383,7 +383,7 @@ def is_qoder_running() -> bool:
     return bool(result.stdout.strip())
 
 
-def stop_qoder(timeout: float = 20.0) -> bool:
+def stop_qoder(timeout: float = 60.0) -> bool:
     """请求 Qoder 正常退出，确保 state.vscdb 和会话文件不被进程继续占用。"""
     if not is_qoder_running():
         return False
@@ -425,7 +425,23 @@ def stop_qoder(timeout: float = 20.0) -> bool:
         if not is_qoder_running():
             return True
         time.sleep(0.25)
-    raise RuntimeError("Qoder 未能在规定时间内退出，请先手动关闭后重试。")
+    if os.name == "nt":
+        # 退出超时后把仍存活的桌面根进程列出来，便于区分关闭卡死与进程探测异常。
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'Qoder IDE.exe' -and $_.ExecutablePath -like '*\\Program Files\\Qoder IDE\\Qoder IDE.exe') -or ($_.Name -eq 'Qoder.exe' -and ($_.ExecutablePath -like '*\\Program Files\\Qoder\\Qoder.exe' -or $_.ExecutablePath -like '*\\Programs\\Qoder\\Qoder.exe')) } | ForEach-Object { \"$($_.ProcessId): $($_.ExecutablePath)\" }",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        survivors = result.stdout.strip()
+        detail = f"仍存活进程：{survivors}" if survivors else "仍有 Qoder 进程未退出，但无法读取其安装路径。"
+        raise RuntimeError(f"Qoder 等待 {timeout:g} 秒后仍未退出。{detail}")
+    raise RuntimeError(f"Qoder 等待 {timeout:g} 秒后仍未退出。")
 
 
 def launch_qoder() -> Path:
